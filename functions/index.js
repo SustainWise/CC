@@ -221,6 +221,199 @@ app.post("/category", async (req, res) => {
     }
 });
 
+// Login Register
+
+app.post("/register", async (req, res) => {
+    const { email, password, username, phone } = req.body;
+
+    if (!email || !password || !username || !phone) {
+        return res.status(400).send("All fields are required");
+    }
+
+    // Validasi format email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).send("Gunakan valid email");
+    }
+
+    try {
+        const userRecord = await admin.auth().createUser({
+            email,
+            password,
+            displayName: username,
+        });
+
+        // Simpan data pengguna tambahan ke Firestore
+        await db.collection("users").doc(userRecord.uid).set({
+            username,
+            email,
+            phone,
+            saldo: "",
+        });
+
+        res.status(201).send("User registered successfully");
+    } catch (error) {
+        console.error("Error registering user:", error);
+        res.status(500).send("Gunakan valid email");
+    }
+});
+
+
+app.post("/login", async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).send("Email and password are required");
+    }
+
+    try {
+        const userRecord = await admin.auth().getUserByEmail(email);
+        const user = await admin.auth().verifyPassword(email, password);
+
+        // Generate custom token untuk aplikasi Anda
+        const customToken = await admin.auth().createCustomToken(userRecord.uid);
+        res.status(200).send({ token: customToken });
+    } catch (error) {
+        console.error("Error logging in with email and password:", error.message);
+        res.status(401).send("Invalid email or password");
+    }
+});
+
+app.post("/register-google", async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).send({
+            success: false,
+            message: "Email is required",
+        });
+    }
+
+    // Validasi format email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).send({
+            success: false,
+            message: "Gunakan valid email",
+        });
+    }
+
+    try {
+        // Periksa apakah pengguna sudah ada
+        const existingUser = await admin.auth().getUserByEmail(email);
+
+        return res.status(200).send({
+            success: true,
+            message: "User already exists. Proceed to login.",
+            user: {
+                uid: existingUser.uid,
+                email: existingUser.email,
+            },
+        });
+    } catch (error) {
+        if (error.code === "auth/user-not-found") {
+            try {
+                // Buat pengguna baru jika tidak ditemukan
+                const newUser = await admin.auth().createUser({
+                    email: email,
+                });
+
+                // Tambahkan data pengguna ke Firestore
+                await db.collection("users").doc(newUser.uid).set({
+                    email: newUser.email,
+                    username: "", // Kosongkan username
+                    phone: "",
+                    saldo: "",   // Kosongkan phone
+                });
+
+                return res.status(201).send({
+                    success: true,
+                    message: "User registered successfully",
+                    user: {
+                        uid: newUser.uid,
+                        email: newUser.email,
+                    },
+                });
+            } catch (createError) {
+                console.error("Error creating new user:", createError.message);
+                return res.status(500).send({
+                    success: false,
+                    message: "Gunakan valid email",
+                });
+            }
+        }
+
+        console.error("Error registering user with Google:", error.message);
+        return res.status(500).send({
+            success: false,
+            message: "Gunakan valid email",
+        });
+    }
+});
+
+// Endpoint untuk login menggunakan Google ID Token
+app.post("/login-google", async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).send({
+            success: false,
+            message: "Email is required",
+        });
+    }
+
+    try {
+        // Periksa apakah pengguna sudah ada
+        const userRecord = await admin.auth().getUserByEmail(email);
+        // Buat token khusus untuk pengguna
+        const customToken = await admin.auth().createCustomToken(userRecord.uid);
+
+        return res.status(200).send({
+            success: true,
+            message: "Login successful",
+            token: customToken,
+            user: {
+                uid: userRecord.uid,
+                email: userRecord.email,
+                displayName: userRecord.displayName,
+            },
+        });
+    } catch (error) {
+        console.error("Error during Google login:", error.code, error.message, error);
+
+        if (error.code === "auth/user-not-found") {
+            return res.status(404).send({
+                success: false,
+                message: "User not found. Please register first.",
+            });
+        }
+
+        if (error.code === "auth/invalid-email") {
+            return res.status(400).send({
+                success: false,
+                message: "Invalid email format.",
+            });
+        }
+
+        return res.status(500).send({
+            success: false,
+            message: "An error occurred during login",
+        });
+    }
+});
+
+
+
+// Endpoint untuk mendapatkan data pengguna setelah login
+app.get("/user", authenticate, async (req, res) => {
+    try {
+        const userRecord = await admin.auth().getUser(req.user.uid);
+        res.status(200).send(userRecord);
+    } catch (error) {
+        console.error("Error fetching user data:", error.message);
+        res.status(500).send("Error fetching user data");
+    }
+});
 
 // Export the app
 exports.app = functions.https.onRequest(app);
