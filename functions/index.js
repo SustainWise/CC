@@ -1,25 +1,35 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const multer = require("multer");
 const express = require("express");
 const cors = require("cors");
 const { getWeek, startOfMonth, endOfMonth } = require('date-fns');
 const { Timestamp } = require('firebase-admin/firestore');
+const { Storage } = require("@google-cloud/storage");
+const multer = require("multer");
+const storage = new Storage();
+const bucket = storage.bucket("gs://sustainwise-36776.firebasestorage.app"); 
 
-// Initialize Firebase Admin
 admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    storageBucket: "sustainwise-36776.appspot.com", // Ganti dengan nama bucket Anda
+    credential: admin.credential.applicationDefault()
 });
 
-const bucket = admin.storage().bucket(); // Default bucket
-const upload = multer({ storage: multer.memoryStorage() }); // Ganti dengan nama bucket Anda
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 5 * 1024 * 1024, // Maksimal 5MB
+    },
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+        if (!allowedTypes.includes(file.mimetype)) {
+            return cb(new Error('Only JPG, JPEG, and PNG images are allowed.'));
+        }
+        cb(null, true);
+    }
+});
 
 const app = express();
 app.use(cors({ origin: true }));
 const db = admin.firestore();
-
-
 
 
 // token untuk firebase Auth
@@ -40,18 +50,13 @@ const authenticate = async (req, res, next) => {
     }
 };
 
-app.patch("/edit-user", authenticate, upload.single("photo"), async (req, res) => {
-    const { username } = req.body;
-    const photo = req.file;
+app.patch("/edit-user", authenticate, async (req, res) => {
+    const { username, photo } = req.body;
 
     if (!username && !photo) {
         return res.status(400).send({
             error: "Bad Request",
             message: "At least one of username or photo must be provided.",
-            details: {
-                receivedBody: req.body,
-                receivedFile: req.file ? req.file.originalname : null,
-            },
         });
     }
 
@@ -65,46 +70,51 @@ app.patch("/edit-user", authenticate, upload.single("photo"), async (req, res) =
         }
 
         if (photo) {
-            const filePath = `users/${userId}/profile-photo-${Date.now()}`;
-            const file = bucket.file(filePath);
-            const blobStream = file.createWriteStream({
-                metadata: {
-                    contentType: photo.mimetype,
-                },
+            // Decode Base64 image string
+            const matches = photo.match(/^data:image\/([a-zA-Z]*);base64,([^\"]*)$/);
+            if (!matches || matches.length !== 3) {
+                return res.status(400).send({
+                    error: "Bad Request",
+                    message: "Invalid image data format",
+                });
+            }
+
+            const imageBuffer = Buffer.from(matches[2], 'base64');
+
+            // Generate a file name
+            const fileName = `users/${userId}/profile-photo-${Date.now()}.jpg`;
+
+            const blob = bucket.file(fileName);
+            const blobStream = blob.createWriteStream({
+                resumable: false,
             });
 
             blobStream.on("error", (err) => {
                 console.error("Upload error:", err);
                 return res.status(500).send({
                     error: "Internal Server Error",
-                    message: "Failed to upload image.",
-                    details: err.message,
+                    message: `Failed to upload image. Error: ${JSON.stringify(err)}`,
                 });
             });
 
             blobStream.on("finish", async () => {
-                try {
-                    const publicUrl = `https://firebasestorage.googleapis.com/v0/b/{bucket-name}/o/{encoded-file-path}?alt=media`;
-                    updateData.photo = publicUrl;
+                // Get public URL from Firebase Storage
+                const publicUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(blob.name)}?alt=media`;
+                updateData.photo = publicUrl;
 
-                    await userRef.update(updateData);
+                // Update user data in Firestore
+                await userRef.update(updateData);
 
-                    return res.status(200).send({
-                        message: "User updated successfully",
-                        updatedFields: updateData,
-                    });
-                } catch (error) {
-                    console.error("Error updating Firestore:", error);
-                    return res.status(500).send({
-                        error: "Internal Server Error",
-                        message: "Failed to update Firestore.",
-                        details: error.message,
-                    });
-                }
+                return res.status(200).send({
+                    message: "User updated successfully",
+                    updatedFields: updateData,
+                });
             });
 
-            blobStream.end(photo.buffer);
+            // Upload file buffer
+            blobStream.end(imageBuffer);
         } else {
+            // Jika tidak ada photo, hanya update username
             await userRef.update(updateData);
             return res.status(200).send({
                 message: "User updated successfully",
@@ -112,16 +122,50 @@ app.patch("/edit-user", authenticate, upload.single("photo"), async (req, res) =
             });
         }
     } catch (error) {
-        console.error("Error processing request:", error);
+        console.error("Error updating user:", error);
         return res.status(500).send({
             error: "Internal Server Error",
-            message: "Unexpected error occurred while processing the request.",
-            details: error.message,
+            message: error.message,
         });
     }
 });
 
+app.get("/user", authenticate, async (req, res) => {
+    try {
+        // Mengambil data pengguna dari Firebase Authentication
+        const userRecord = await admin.auth().getUser(req.user.uid);
 
+        // Mengambil data pengguna dari Firestore
+        const userRef = db.collection("users").doc(req.user.uid);
+        const userDoc = await userRef.get();
+
+        // Jika pengguna tidak ditemukan di Firestore
+        if (!userDoc.exists) {
+            return res.status(404).send({
+                error: "Not Found",
+                message: "User data not found in Firestore.",
+            });
+        }
+
+        // Mendapatkan data yang dibutuhkan
+        const { username, photo } = userDoc.data();
+
+        // Membuat response
+        const userData = {
+            email: userRecord.email, // Dari Firebase Authentication
+            username: username || null, // Dari Firestore
+            photo: photo || null, // Dari Firestore
+        };
+
+        return res.status(200).send(userData);
+    } catch (error) {
+        console.error("Error fetching user data:", error.message);
+        res.status(500).send({
+            error: "Internal Server Error",
+            message: error.message,
+        });
+    }
+});
 
 // Add Transaction
 app.post("/transaction", authenticate, async (req, res) => {
@@ -561,16 +605,6 @@ app.get("/saldo", authenticate, async (req, res) => {
 });
 
 
-// Endpoint untuk mendapatkan data pengguna setelah login
-app.get("/user", authenticate, async (req, res) => {
-    try {
-        const userRecord = await admin.auth().getUser(req.user.uid);
-        res.status(200).send(userRecord);
-    } catch (error) {
-        console.error("Error fetching user data:", error.message);
-        res.status(500).send("Error fetching user data");
-    }
-});
 
 
 // Export the app
