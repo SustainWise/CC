@@ -9,7 +9,7 @@ const { Timestamp } = require('firebase-admin/firestore');
 // Initialize Firebase Admin
 admin.initializeApp({
     credential: admin.credential.applicationDefault(),
-    storageBucket: "gs://sustainwise-36776.firebasestorage.app", // Ganti dengan nama bucket Anda
+    storageBucket: "sustainwise-36776.appspot.com", // Ganti dengan nama bucket Anda
 });
 
 const bucket = admin.storage().bucket(); // Default bucket
@@ -84,7 +84,7 @@ app.patch("/edit-user", authenticate, upload.single("photo"), async (req, res) =
 
             blobStream.on("finish", async () => {
                 try {
-                    const publicUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(filePath)}?alt=media`;
+                    const publicUrl = `https://firebasestorage.googleapis.com/v0/b/{bucket-name}/o/{encoded-file-path}?alt=media`;
                     updateData.photo = publicUrl;
 
                     await userRef.update(updateData);
