@@ -167,30 +167,29 @@ app.get("/user", authenticate, async (req, res) => {
     }
 });
 
-// Add Transaction
 app.post("/transaction", authenticate, async (req, res) => {
-    const { type, category, amount } = req.body;
+    const { type, category, amount, date } = req.body;
 
-    if (!type || !category || !amount) {
+    if (!type || !category || !amount || !date) {
         return res.status(400).send("Bad Request: Missing required fields");
     }
+
+    if (type !== "Income" && type !== "Outcome") {
+        return res.status(400).send("Bad Request: Type must be 'Income' or 'Outcome'");
+    }
+
+    let transactionDate;
     try {
-        // If the type is "Income", category can be any string, no need to check it against the categories collection
-        if (type === "Income") {
-            // Ensure that category is a valid string and not empty
-            if (typeof category !== 'string' || category.trim() === "") {
-                return res.status(400).send("Bad Request: Invalid category for Income");
-            }
-        } else {
-            // For other types, validate the category exists in the "categories" collection
-            const categoryRef = db.collection("categories").doc(category);
-            const categoryDoc = await categoryRef.get();
-
-            if (!categoryDoc.exists) {
-                return res.status(400).send("Bad Request: Invalid category");
-            }
+        transactionDate = new Date(date);
+        if (isNaN(transactionDate.getTime())) {
+            return res.status(400).send("Bad Request: Invalid date format");
         }
+    } catch (error) {
+        return res.status(400).send("Bad Request: Invalid date format");
+    }
 
+    try {
+        // Referensi ke user dan saldo
         const userRef = db.collection("users").doc(req.user.uid);
         const userDoc = await userRef.get();
 
@@ -198,33 +197,36 @@ app.post("/transaction", authenticate, async (req, res) => {
             return res.status(404).send("User not found");
         }
 
-        // Calculate the new balance
         const currentSaldo = userDoc.data().saldo || 0;
-        const updatedSaldo = type === "Income"
-            ? currentSaldo + parseFloat(amount)
-            : currentSaldo - parseFloat(amount);
+        const transactionAmount = parseFloat(amount);
 
-        // Update user's saldo
-        await userRef.update({ saldo: updatedSaldo });
+        // Hitung saldo baru
+        const newSaldo = type === "Income"
+            ? currentSaldo + transactionAmount
+            : currentSaldo - transactionAmount;
 
-        // Add transaction to Firestore
-        const newTransactionRef = db.collection("transactions").doc();
-        const newTransactionId = newTransactionRef.id;
+        // Update saldo pengguna
+        await userRef.update({ saldo: newSaldo });
 
-        const newTransaction = {
-            id: newTransactionId, // Store transaction ID
+        // Simpan transaksi ke subkoleksi berdasarkan type
+        const transactionRef = db.collection("transactions")
+            .doc(req.user.uid)
+            .collection(type)
+            .doc();
+
+        await transactionRef.set({
+            id: transactionRef.id,
             user_id: req.user.uid,
             type,
             category,
-            amount: parseFloat(amount),
-            date: new Date(),
-        };
-
-        await newTransactionRef.set(newTransaction);
+            amount: transactionAmount,
+            date: transactionDate,
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+        });
 
         return res.status(201).send({
             message: "Transaction added successfully",
-            newTransaction,
+            newSaldo,
         });
     } catch (error) {
         console.error("Error adding transaction:", error);
@@ -232,14 +234,22 @@ app.post("/transaction", authenticate, async (req, res) => {
     }
 });
 
-
-
 // Kurangi atau Tambahkan Saldo Saat Transaksi Dihapus
-app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
-    const { transactionId } = req.params;
+app.delete("/transaction/:type/:transactionId", authenticate, async (req, res) => {
+    const { type, transactionId } = req.params;
+
+    if (!["Income", "Outcome"].includes(type)) {
+        return res.status(400).send("Bad Request: Type must be 'Income' or 'Outcome'");
+    }
 
     try {
-        const transactionRef = db.collection("transactions").doc(transactionId);
+        // Referensi ke subkoleksi berdasarkan tipe
+        const transactionRef = db
+            .collection("transactions")
+            .doc(req.user.uid)
+            .collection(type)
+            .doc(transactionId);
+
         const transactionDoc = await transactionRef.get();
 
         if (!transactionDoc.exists) {
@@ -248,10 +258,12 @@ app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
 
         const transactionData = transactionDoc.data();
 
+        // Pastikan user hanya dapat menghapus transaksi miliknya
         if (transactionData.user_id !== req.user.uid) {
             return res.status(403).send("Forbidden: You are not authorized to delete this transaction");
         }
 
+        // Referensi ke pengguna
         const userRef = db.collection("users").doc(req.user.uid);
         const userDoc = await userRef.get();
 
@@ -261,20 +273,28 @@ app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
 
         // Update saldo berdasarkan tipe transaksi
         const currentSaldo = userDoc.data().saldo || 0;
-        const updatedSaldo = transactionData.type === "Income"
-            ? currentSaldo - parseFloat(transactionData.amount)
-            : currentSaldo + parseFloat(transactionData.amount);
+        const transactionAmount = parseFloat(transactionData.amount);
 
+        const updatedSaldo =
+            type === "Income"
+                ? currentSaldo - transactionAmount // Kurangi saldo jika income dihapus
+                : currentSaldo + transactionAmount; // Tambahkan saldo jika outcome dihapus
+
+        // Perbarui saldo pengguna
         await userRef.update({ saldo: updatedSaldo });
 
+        // Hapus transaksi
         await transactionRef.delete();
-        return res.status(200).send({ message: "Transaction deleted successfully" });
+
+        return res.status(200).send({
+            message: "Transaction deleted successfully",
+            updatedSaldo,
+        });
     } catch (error) {
         console.error("Error deleting transaction:", error);
         return res.status(500).send("Error deleting transaction: " + error.message);
     }
 });
-
 
 
 app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
@@ -298,34 +318,29 @@ app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
         const startTimestamp = Timestamp.fromDate(startDate);
         const endTimestamp = Timestamp.fromDate(endDate);
 
-        const transactionsRef = db.collection("transactions");
+        // Query transactions from the user's "Outcome" sub-collection
+        const transactionsRef = db.collection("transactions")
+            .doc(req.user.uid) // Access user's sub-collection
+            .collection("Outcome"); // Specify the "Outcome" sub-collection
+
         const querySnapshot = await transactionsRef
-            .where("user_id", "==", req.user.uid)
-            .where("type", "==", "Outcome")
             .where("date", ">=", startTimestamp)
             .where("date", "<=", endTimestamp)
             .get();
 
         const weeklyExpenses = [];
-
-        const daysInMonth = endDate.getDate();
-
-        const maxWeeksInMonth = 4; // Limit to 4 weeks
+        const maxWeeksInMonth = 4;
 
         querySnapshot.forEach((doc) => {
             const transaction = doc.data();
             const transactionDate = transaction.date.toDate();  // Convert Firestore Timestamp to JavaScript Date
 
-            // Calculate week number within the month (max of 4 weeks)
-            const weekNumber = Math.ceil((transactionDate.getDate()) / 7);  // Week calculation
-
-            // Ensure the week number doesn't exceed 4 (weeks 1-4)
+            // Calculate week number within the month
+            const weekNumber = Math.ceil((transactionDate.getDate()) / 7);
             const validWeekNumber = Math.min(weekNumber, maxWeeksInMonth);
 
             let week = weeklyExpenses.find((week) => week.week === validWeekNumber);
-
             if (!week) {
-                // If the week doesn't exist, create a new entry
                 week = { week: validWeekNumber, totalExpense: 0 };
                 weeklyExpenses.push(week);
             }
@@ -333,7 +348,13 @@ app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
             week.totalExpense += transaction.amount;
         });
 
-        // Format the response to display weekly expenses by week number
+        // Ensure all weeks are represented
+        for (let i = 1; i <= maxWeeksInMonth; i++) {
+            if (!weeklyExpenses.some(week => week.week === i)) {
+                weeklyExpenses.push({ week: i, totalExpense: 0 });
+            }
+        }
+
         const formattedWeeks = weeklyExpenses.map(week => ({
             week: `Week ${week.week}`,
             totalExpense: week.totalExpense
@@ -350,7 +371,7 @@ app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
 });
 
 
-app.get("/statistics", authenticate, async (req, res) => {
+app.get("/statistics/outcome-by-category", authenticate, async (req, res) => {
     const { year, month } = req.query;
 
     if (!year || !month) {
@@ -358,29 +379,28 @@ app.get("/statistics", authenticate, async (req, res) => {
     }
 
     try {
-        // Parse year and month from the query parameters
-        const startDate = new Date(Date.UTC(year, month - 1, 1));  // Start of the month
-        const endDate = new Date(Date.UTC(year, month, 0));        // End of the month
+        const startDate = new Date(Date.UTC(year, month - 1, 1)); // Start of the month
+        const endDate = new Date(Date.UTC(year, month, 0)); // End of the month
 
-        // Query all transactions within the month range
         const transactionsQuery = db.collection("transactions")
-            .where("user_id", "==", req.user.uid)
+            .doc(req.user.uid) // Access user's sub-collection
+            .collection("Outcome") // Specify the "Outcome" sub-collection
             .where("date", ">=", startDate)
             .where("date", "<=", endDate);
+
         const snapshot = await transactionsQuery.get();
 
         if (snapshot.empty) {
             return res.status(404).send({ message: `No transactions found for ${year}-${month}.` });
         }
 
-        // Process transactions
         let totalIncome = 0;
         let totalOutcome = 0;
         const categories = {};
 
         snapshot.docs.forEach(doc => {
             const transaction = doc.data();
-            const amount = transaction.amount; // Assume `amount` field exists
+            const amount = transaction.amount;
             const category = transaction.category || "Uncategorized"; // Default category
 
             if (transaction.type === "Income") {
@@ -388,18 +408,13 @@ app.get("/statistics", authenticate, async (req, res) => {
             } else if (transaction.type === "Outcome") {
                 totalOutcome += amount;
 
-                // Calculate total by category for the month
                 categories[category] = (categories[category] || 0) + amount;
             }
         });
 
-        const savings = totalIncome - totalOutcome;
-
         return res.status(200).send({
-            message: `Statistics for ${year}-${month}`,
-            totalIncome,
+            message: `Outcome by Category statistics for ${year}-${month}`,
             totalOutcome,
-            savings,
             categories,
         });
     } catch (error) {
@@ -408,6 +423,56 @@ app.get("/statistics", authenticate, async (req, res) => {
     }
 });
 
+app.get("/statistics/income-vs-outcome", authenticate, async (req, res) => {
+    const { year, month } = req.query;
+
+    if (!year || !month) {
+        return res.status(400).send("Bad Request: Missing required fields (year, month).");
+    }
+
+    try {
+        const startDate = new Date(Date.UTC(year, month - 1, 1)); // Start of the month
+        const endDate = new Date(Date.UTC(year, month, 0)); // End of the month
+
+        // Query both Income and Outcome sub-collections for the user
+        const incomeQuery = db.collection("transactions")
+            .doc(req.user.uid)
+            .collection("Income")
+            .where("date", ">=", startDate)
+            .where("date", "<=", endDate);
+
+        const outcomeQuery = db.collection("transactions")
+            .doc(req.user.uid)
+            .collection("Outcome")
+            .where("date", ">=", startDate)
+            .where("date", "<=", endDate);
+
+        // Fetch income transactions
+        const incomeSnapshot = await incomeQuery.get();
+        let totalIncome = 0;
+        incomeSnapshot.docs.forEach(doc => {
+            const transaction = doc.data();
+            totalIncome += transaction.amount;
+        });
+
+        // Fetch outcome transactions
+        const outcomeSnapshot = await outcomeQuery.get();
+        let totalOutcome = 0;
+        outcomeSnapshot.docs.forEach(doc => {
+            const transaction = doc.data();
+            totalOutcome += transaction.amount;
+        });
+
+        return res.status(200).send({
+            message: `Income vs Outcome statistics for ${year}-${month}`,
+            totalIncome,
+            totalOutcome,
+        });
+    } catch (error) {
+        console.error("Error fetching statistics:", error);
+        return res.status(500).send({ error: "Internal Server Error", message: error.message });
+    }
+});
 
 
 // riwayat per bulan
@@ -419,105 +484,186 @@ app.get("/transactions/monthly", authenticate, async (req, res) => {
     }
 
     try {
-        const startDate = new Date(year, month - 1, 1);
-        const endDate = new Date(year, month, 0);
+        const startDate = new Date(year, month - 1, 1); // Start of the month
+        const endDate = new Date(year, month, 0); // End of the month (last day of the month)
+
+        const transactions = [];
+
+        // Function to query a user's transactions of a specific type within a date range
+        const getTransactionsByType = async (transactionType) => {
+            const transactionsQuery = db.collection("transactions")
+                .doc(req.user.uid) // The user's sub-collection
+                .collection(transactionType) // Sub-collection: "Income" or "Outcome"
+                .where("date", ">=", startDate)
+                .where("date", "<=", endDate);
+
+            const snapshot = await transactionsQuery.get();
+            snapshot.forEach(doc => {
+                transactions.push({
+                    id: doc.id,
+                    ...doc.data(),
+                    date: doc.data().date.toDate().toISOString(), // Convert date to ISO string
+                });
+            });
+        };
 
         if (type === "All") {
-            // Query 'Income' transactions
-            const incomeQuery = db.collection("transactions")
-                .where("user_id", "==", req.user.uid)
-                .where("type", "==", "Income")
-                .where("date", ">=", startDate)
-                .where("date", "<=", endDate);
-            const incomeSnapshot = await incomeQuery.get();
-
-            // Query 'Outcome' transactions
-            const outcomeQuery = db.collection("transactions")
-                .where("user_id", "==", req.user.uid)
-                .where("type", "==", "Outcome")
-                .where("date", ">=", startDate)
-                .where("date", "<=", endDate);
-            const outcomeSnapshot = await outcomeQuery.get();
-
-            // Combine results
-            const incomeTransactions = incomeSnapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data(),
-                date: doc.data().date.toDate().toISOString(), // Convert date to ISO string
-            }));
-
-            const outcomeTransactions = outcomeSnapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data(),
-                date: doc.data().date.toDate().toISOString(),
-            }));
-
-            const allTransactions = [...incomeTransactions, ...outcomeTransactions];
-
-            if (allTransactions.length === 0) {
-                return res.status(404).send({ message: `No transactions found for ${month}-${year}.` });
-            }
-
-            return res.status(200).send({
-                message: `All transactions (Income and Outcome) for ${month}-${year}`,
-                transactions: allTransactions,
-            });
+            // Query both "Income" and "Outcome"
+            await getTransactionsByType("Income");
+            await getTransactionsByType("Outcome");
         } else {
-            // Query specific type (Income or Outcome)
-            const transactionsQuery = db.collection("transactions")
-                .where("user_id", "==", req.user.uid)
-                .where("type", "==", type)
-                .where("date", ">=", startDate)
-                .where("date", "<=", endDate);
-            const snapshot = await transactionsQuery.get();
-
-            if (snapshot.empty) {
-                return res.status(404).send({ message: `No ${type} transactions found for ${month}-${year}.` });
-            }
-
-            const transactions = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data(),
-                date: doc.data().date.toDate().toISOString(),
-            }));
-
-            return res.status(200).send({
-                message: `${type} transactions for ${month}-${year}`,
-                transactions,
-            });
+            // Query for a specific type (Income or Outcome)
+            await getTransactionsByType(type);
         }
+
+        if (transactions.length === 0) {
+            return res.status(404).send({ message: `No ${type} transactions found for ${month}-${year}.` });
+        }
+
+        return res.status(200).send({
+            message: `${type === 'All' ? 'All' : type} transactions for ${month}-${year}`,
+            transactions,
+        });
     } catch (error) {
         console.error("Error fetching transactions:", error);
         return res.status(500).send({ error: "Internal Server Error", message: error.message });
     }
 });
 
-// Endpoint: Get latest 5 transactions
 app.get("/transactions/latest", authenticate, async (req, res) => {
     try {
+        // Query transactions for the user, order by created_at, and limit to 5 latest transactions
         const transactionsQuery = db.collection("transactions")
-            .where("user_id", "==", req.user.uid)
-            .orderBy("date", "desc")
+            .doc(req.user.uid) // The user's sub-collection
+            .collection("Income") // Start with the "Income" sub-collection
+            .orderBy("created_at", "desc")
             .limit(5);
 
-        const snapshot = await transactionsQuery.get();
+        // Query for Outcome transactions as well
+        const outcomeQuery = db.collection("transactions")
+            .doc(req.user.uid) // The user's sub-collection
+            .collection("Outcome") // Outcome sub-collection
+            .orderBy("created_at", "desc")
+            .limit(5);
 
-        if (snapshot.empty) {
+        // Fetch both queries
+        const [incomeSnapshot, outcomeSnapshot] = await Promise.all([
+            transactionsQuery.get(),
+            outcomeQuery.get(),
+        ]);
+
+        const transactions = [];
+
+        // Process the "Income" transactions
+        incomeSnapshot.forEach(doc => {
+            const data = doc.data();
+            let date = data.date;
+            if (date instanceof admin.firestore.Timestamp) {
+                date = date.toDate().toISOString();
+            }
+
+            let created_at = data.created_at;
+            if (created_at instanceof admin.firestore.Timestamp) {
+                created_at = created_at.toDate().toISOString();
+            }
+
+            transactions.push({
+                id: doc.id,
+                ...data,
+                date,
+                created_at,
+            });
+        });
+
+        // Process the "Outcome" transactions
+        outcomeSnapshot.forEach(doc => {
+            const data = doc.data();
+            let date = data.date;
+            if (date instanceof admin.firestore.Timestamp) {
+                date = date.toDate().toISOString();
+            }
+
+            let created_at = data.created_at;
+            if (created_at instanceof admin.firestore.Timestamp) {
+                created_at = created_at.toDate().toISOString();
+            }
+
+            transactions.push({
+                id: doc.id,
+                ...data,
+                date,
+                created_at,
+            });
+        });
+
+        // Sort the transactions by created_at (in case some are from different collections)
+        transactions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+        if (transactions.length === 0) {
             return res.status(404).send({ message: "No transactions found" });
         }
 
-        const transactions = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            date: doc.data().date.toDate().toISOString(), // Convert date to ISO string
-        }));
-
         return res.status(200).send({
             message: "Latest 5 transactions retrieved successfully",
-            transactions,
+            transactions: transactions.slice(0, 5), // Limit to the 5 latest transactions
         });
     } catch (error) {
         console.error("Error fetching latest transactions:", error);
+        return res.status(500).send({ error: "Internal Server Error", message: error.message });
+    }
+});
+
+app.get("/saldo/monthly", authenticate, async (req, res) => {
+    try {
+        // Extract the month and year from query parameters
+        const { month, year } = req.query;
+
+        // Check if both month and year are provided
+        if (!month || !year) {
+            return res.status(400).send("Bad Request: Missing month or year parameter");
+        }
+
+        // Validate that the month is between 1 and 12
+        if (isNaN(month) || month < 1 || month > 12) {
+            return res.status(400).send("Bad Request: Invalid month value. It should be between 1 and 12.");
+        }
+
+        // Validate that the year is a valid number
+        if (isNaN(year)) {
+            return res.status(400).send("Bad Request: Invalid year value.");
+        }
+
+        // Query the saldo_checkpoint for the specific month and year
+        const saldoCheckpointRef = db.collection("saldo_checkpoint")
+            .doc(req.user.uid)
+            .collection("monthly")
+            .where("month", "==", parseInt(month)) // Filter by the specific month
+            .where("year", "==", parseInt(year)) // Filter by the specified year
+            .limit(1); // We only need one document, so limit to 1
+
+        const snapshot = await saldoCheckpointRef.get();
+
+        if (snapshot.empty) {
+            return res.status(404).send({
+                message: `No saldo checkpoint data found for ${month}/${year}`
+            });
+        }
+
+        // Prepare the saldo data for response, returning only the necessary fields
+        const saldoData = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                saldo_start_of_month: data.saldo_start_of_month,
+                saldo_end_of_month: data.saldo_end_of_month
+            };
+        });
+
+        return res.status(200).send({
+            message: "Saldo data retrieved successfully",
+            saldo: saldoData[0], // Since we limited to 1, we return the first item
+        });
+    } catch (error) {
+        console.error("Error retrieving saldo data:", error);
         return res.status(500).send({ error: "Internal Server Error", message: error.message });
     }
 });
