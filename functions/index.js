@@ -8,6 +8,7 @@ const { Storage } = require("@google-cloud/storage");
 const multer = require("multer");
 const storage = new Storage();
 const bucket = storage.bucket("gs://sustainwise-36776.firebasestorage.app"); 
+const { FieldValue } = require('firebase-admin').firestore;
 
 admin.initializeApp({
     credential: admin.credential.applicationDefault()
@@ -129,6 +130,74 @@ app.patch("/edit-user", authenticate, async (req, res) => {
         });
     }
 });
+
+// Endpoint untuk menghapus foto profil pengguna
+app.delete("/delete-photo", authenticate, async (req, res) => {
+    try {
+        const userId = req.user.uid;
+        const userRef = db.collection("users").doc(userId);
+
+        // Get user data
+        const userDoc = await userRef.get();
+        if (!userDoc.exists) {
+            return res.status(404).send({
+                error: "Not Found",
+                message: "User not found."
+            });
+        }
+
+        const userData = userDoc.data();
+
+        if (!userData.photo) {
+            return res.status(400).send({
+                error: "Bad Request",
+                message: "No photo to delete."
+            });
+        }
+
+        // Get the photo URL from userData.photo
+        const photoUrl = userData.photo;
+
+        // Decode the file path from the URL
+        const decodedPath = decodeURIComponent(photoUrl.split("/o/")[1].split("?alt=media")[0]);
+
+        // Log the decoded path for debugging purposes
+        console.log("Decoded path:", decodedPath);
+
+        // Delete the photo from Firebase Storage
+        const file = bucket.file(decodedPath);
+
+        // Check if file exists
+        const [exists] = await file.exists();
+        if (!exists) {
+            return res.status(404).send({
+                error: "Not Found",
+                message: "File not found in Firebase Storage."
+            });
+        }
+
+        // Proceed to delete the photo from Firebase Storage
+        await file.delete();
+
+        // Update Firestore to remove the photo reference
+        await userRef.update({
+            photo: FieldValue.delete() // Ensure FieldValue is imported
+        });
+
+        // Send success response
+        return res.status(200).send({
+            message: "Photo deleted successfully."
+        });
+    } catch (error) {
+        console.error("Error deleting photo:", error);
+        return res.status(500).send({
+            error: "Internal Server Error",
+            message: error.message
+        });
+    }
+});
+
+
 
 app.get("/user", authenticate, async (req, res) => {
     try {
@@ -612,118 +681,6 @@ app.get("/transactions/latest", authenticate, async (req, res) => {
         return res.status(500).send({ error: "Internal Server Error", message: error.message });
     }
 });
-
-app.get("/saldo/monthly", authenticate, async (req, res) => {
-    try {
-        // Extract the month and year from query parameters
-        const { month, year } = req.query;
-
-        // Check if both month and year are provided
-        if (!month || !year) {
-            return res.status(400).send("Bad Request: Missing month or year parameter");
-        }
-
-        // Validate that the month is between 1 and 12
-        if (isNaN(month) || month < 1 || month > 12) {
-            return res.status(400).send("Bad Request: Invalid month value. It should be between 1 and 12.");
-        }
-
-        // Validate that the year is a valid number
-        if (isNaN(year)) {
-            return res.status(400).send("Bad Request: Invalid year value.");
-        }
-
-        // Query the saldo_checkpoint for the specific month and year
-        const saldoCheckpointRef = db.collection("saldo_checkpoint")
-            .doc(req.user.uid)
-            .collection("monthly")
-            .where("month", "==", parseInt(month)) // Filter by the specific month
-            .where("year", "==", parseInt(year)) // Filter by the specified year
-            .limit(1); // We only need one document, so limit to 1
-
-        const snapshot = await saldoCheckpointRef.get();
-
-        if (snapshot.empty) {
-            return res.status(404).send({
-                message: `No saldo checkpoint data found for ${month}/${year}`
-            });
-        }
-
-        // Prepare the saldo data for response, returning only the necessary fields
-        const saldoData = snapshot.docs.map(doc => {
-            const data = doc.data();
-            return {
-                saldo_start_of_month: data.saldo_start_of_month,
-                saldo_end_of_month: data.saldo_end_of_month
-            };
-        });
-
-        return res.status(200).send({
-            message: "Saldo data retrieved successfully",
-            saldo: saldoData[0], // Since we limited to 1, we return the first item
-        });
-    } catch (error) {
-        console.error("Error retrieving saldo data:", error);
-        return res.status(500).send({ error: "Internal Server Error", message: error.message });
-    }
-});
-
-
-// Add a new category
-app.post("/category", async (req, res) => {
-    const { name, defaultCategory } = req.body;
-
-    if (!name) {
-        return res.status(400).send("Bad Request: Missing required fields");
-    }
-
-    try {
-        const newCategory = {
-            name,
-            default: defaultCategory || false,
-        };
-
-        await db.collection("categories").doc(name).set(newCategory);
-        return res.status(201).send({ message: "Category added successfully", newCategory });
-    } catch (error) {
-        return res.status(500).send("Error adding category: " + error.message);
-    }
-});
-
-// Register User - Tambahkan Saldo Awal
-app.post("/register", async (req, res) => {
-    const { email, password, username } = req.body;
-
-    if (!email || !password || !username) {
-        return res.status(400).send("All fields are required");
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-        return res.status(400).send("Gunakan valid email");
-    }
-
-    try {
-        const userRecord = await admin.auth().createUser({
-            email,
-            password,
-            displayName: username,
-        });
-
-        await db.collection("users").doc(userRecord.uid).set({
-            username,
-            email,
-            saldo: 0, // Set saldo awal menjadi 0
-            photo: null, // Set photo sebagai null
-        });
-
-        res.status(201).send("User registered successfully");
-    } catch (error) {
-        console.error("Error registering user:", error);
-        res.status(500).send("Error registering user");
-    }
-});
-
 
 
 app.get("/saldo", authenticate, async (req, res) => {
