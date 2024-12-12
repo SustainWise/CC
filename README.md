@@ -38,10 +38,8 @@ Creating the Sustain Wise Backend API App
 7. Create Cloud Storage:
    - Create Cloud Storage to upload the tf.lite model.
    - Why we use TensorFlow Lite because the model it only analyzes a user's financial data over a month to provide tips and recommendations. So TFLite model is       an ideal choice for  ensuring faster performance and lower latency. Storing it in Cloud Storage allows easy access for the mobile application while keeping      deployment and maintenance costs low.
-     
-8. Create Project Architecture
-   
-10. Create Github Organization
+
+8. Create Github Organization
    - Add readme to the github organization for project documentation
    - add 3 repositories, 1 for CC, 1 for MD, and 1 for ML
 
