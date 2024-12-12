@@ -6,6 +6,9 @@
    - Node js version v18.20.4
    - Firebase
    - Postman
+   - 
+## Link BackEnd API with Cloud Run Function
+https://sustainwise-1041878630324.asia-southeast2.run.app
 
 ## API Documentaion
 https://documenter.getpostman.com/view/36349178/2sAYHwL5qo
