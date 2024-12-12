@@ -6,4 +6,8 @@
    - Firebase
    - Postman
 
+## Project Architecture
+
+<img src="https://github.com/SustainWise/.github/blob/main/profile/assets/sustainwise-cloud-architecture.jpg" alt="Cloud Architecture" width="1000">
+
 
