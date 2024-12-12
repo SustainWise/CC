@@ -181,12 +181,14 @@ app.delete("/delete-photo", authenticate, async (req, res) => {
 
         // Update Firestore to remove the photo reference
         await userRef.update({
-            photo: FieldValue.delete() // Ensure FieldValue is imported
+            photo: null // Menjadikan photo null di Firestore
         });
+
 
         // Send success response
         return res.status(200).send({
-            message: "Photo deleted successfully."
+            message: "Photo deleted successfully.",
+            photo: null // Informasikan ke klien bahwa photo sekarang null
         });
     } catch (error) {
         console.error("Error deleting photo:", error);
